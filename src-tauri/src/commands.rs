@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use tauri::{State};
 use chrono::Utc;
-use sqlx::{sqlite::SqlitePool, Row};
+use sqlx::{Row};
 use rss::Channel;
 use reqwest::Client;
 use std::time::Duration;
 use uuid::Uuid;
+use crate::DbState; // Use the state from lib.rs
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Filter {
@@ -51,13 +52,9 @@ pub struct DownloadTask {
     pub download_speed: String,
 }
 
-pub struct DbState {
-    pub pool: SqlitePool,
-}
-
 // --- Aria2 Helpers ---
 
-async fn aria2_rpc_call(method: &str, params: Vec<serde_json::Value>, pool: &SqlitePool) -> Result<serde_json::Value, String> {
+async fn aria2_rpc_call(method: &str, params: Vec<serde_json::Value>, pool: &sqlx::SqlitePool) -> Result<serde_json::Value, String> {
     let settings = get_settings_internal(pool).await;
     let client = Client::new();
     let mut final_params = params;
@@ -108,7 +105,7 @@ async fn submit_to_aria2(rpc_url: &str, secret: &str, magnet: &str) -> bool {
     }
 }
 
-pub async fn check_feeds(pool: &SqlitePool) {
+pub async fn check_feeds(pool: &sqlx::SqlitePool) {
     let client = match Client::builder().timeout(Duration::from_secs(30)).build() {
         Ok(c) => c,
         Err(_) => return,
@@ -173,7 +170,7 @@ pub async fn check_feeds(pool: &SqlitePool) {
     }
 }
 
-async fn get_settings_internal(pool: &SqlitePool) -> AppSettings {
+async fn get_settings_internal(pool: &sqlx::SqlitePool) -> AppSettings {
     let rows = sqlx::query("SELECT key, value FROM settings").fetch_all(pool).await.unwrap_or_default();
     let find = |k: &str, default: &str| rows.iter().find(|r| r.get::<String, _>(0) == k).map(|r| r.get::<String, _>(1)).unwrap_or_else(|| default.to_string());
     
@@ -251,17 +248,16 @@ pub async fn get_settings(state: State<'_, DbState>) -> Result<AppSettings, Stri
 pub async fn save_settings(state: State<'_, DbState>, settings: AppSettings) -> Result<(), String> {
     sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('aria2_rpc_url', ?), ('aria2_rpc_secret', ?), ('download_path', ?), ('max_threads', ?)")
         .bind(settings.aria2_rpc_url).bind(settings.aria2_rpc_secret).bind(settings.download_path).bind(settings.max_threads)
-        .execute(&state.pool).await.map_err(|e| e.to_string())?;
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
-
-// --- Aria2 Task Management ---
 
 #[tauri::command]
 pub async fn get_tasks(state: State<'_, DbState>) -> Result<Vec<DownloadTask>, String> {
     let res = aria2_rpc_call("aria2.tellAll", vec![], &state.pool).await?;
     let tasks: Vec<DownloadTask> = res.as_array().unwrap_or(&vec![]).iter().map(|t| {
-        // Find name from bittorrent info or path
         let name = t["bittorrent"]["info"]["name"].as_str()
             .or_else(|| t["files"][0]["path"].as_str())
             .unwrap_or("Unknown Task").to_string();
@@ -292,7 +288,6 @@ pub async fn resume_task(state: State<'_, DbState>, gid: String) -> Result<(), S
 
 #[tauri::command]
 pub async fn remove_task(state: State<'_, DbState>, gid: String) -> Result<(), String> {
-    // Try force remove
     let _ = aria2_rpc_call("aria2.forceRemove", vec![serde_json::json!(gid)], &state.pool).await;
     let _ = aria2_rpc_call("aria2.removeDownloadResult", vec![serde_json::json!(gid)], &state.pool).await;
     Ok(())

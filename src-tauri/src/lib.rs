@@ -1,11 +1,10 @@
 mod commands;
 
 use tauri::{Manager};
-use sqlx::{sqlite::SqlitePool, sqlite::SqliteConnectOptions};
+use sqlx::{sqlite::SqlitePool, sqlite::SqliteConnectOptions, Row};
 use std::time::Duration;
 use crate::commands::*;
 use tauri_plugin_shell::ShellExt;
-use std::str::FromStr;
 
 pub struct DbState {
     pub pool: SqlitePool,
@@ -28,24 +27,42 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             
-            if let Ok(sidecar) = app.shell().sidecar("aria2c") {
-                let _ = sidecar.args(["--enable-rpc", "--rpc-listen-all", "--rpc-allow-origin-all", "--quiet"]).spawn();
-            }
-
+            // 1. Initialize Database first
             let pool = tauri::async_runtime::block_on(async move {
                 let data_dir = handle.path().app_data_dir().expect("Failed to get app data dir");
                 std::fs::create_dir_all(&data_dir).expect("Failed to create app data dir");
                 let db_path = data_dir.join("anime_garden.db");
-                
-                // Use SqliteConnectOptions for better robustness and auto-creation
-                let options = SqliteConnectOptions::new()
-                    .filename(db_path)
-                    .create_if_missing(true);
-                
+                let options = SqliteConnectOptions::new().filename(db_path).create_if_missing(true);
                 let pool = SqlitePool::connect_with(options).await.expect("Failed to connect to database");
                 init_db(&pool).await.expect("Failed to initialize database");
                 pool
             });
+
+            // 2. Fetch Secret from Settings
+            let rpc_secret = tauri::async_runtime::block_on(async {
+                sqlx::query("SELECT value FROM settings WHERE key = 'aria2_rpc_secret'")
+                    .fetch_optional(&pool).await.ok().flatten().map(|r| r.get::<String, _>(0)).unwrap_or_default()
+            });
+
+            // 3. Start Aria2 Sidecar with the correct Secret
+            if let Ok(sidecar) = app.shell().sidecar("aria2c") {
+                let mut args = vec![
+                    "--enable-rpc".to_string(),
+                    "--rpc-listen-all=true".to_string(),
+                    "--rpc-allow-origin-all=true".to_string(),
+                    "--quiet=true".to_string()
+                ];
+                
+                // If secret exists, pass it to the binary
+                if !rpc_secret.is_empty() {
+                    args.push(format!("--rpc-secret={}", rpc_secret));
+                }
+
+                match sidecar.args(args).spawn() {
+                    Ok(_) => println!("Aria2 sidecar started with secret: {}", !rpc_secret.is_empty()),
+                    Err(e) => eprintln!("Failed to spawn aria2c: {}", e),
+                }
+            }
 
             app.manage(DbState { pool: pool.clone() });
 

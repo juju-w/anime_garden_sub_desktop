@@ -29,22 +29,29 @@ pub fn run() {
             
             let (mut _rx, _child) = sidecar_command.spawn().expect("Failed to spawn aria2c sidecar");
 
-            tauri::async_runtime::spawn(async move {
+            // Use block_on for critical initialization to ensure state is managed before setup returns
+            let pool = tauri::async_runtime::block_on(async move {
                 let data_dir = handle.path().app_data_dir().unwrap();
                 std::fs::create_dir_all(&data_dir).unwrap();
                 let db_path = data_dir.join("anime_garden.db");
                 let db_url = format!("sqlite:{}", db_path.to_str().unwrap());
                 let pool = SqlitePool::connect(&db_url).await.unwrap();
                 init_db(&pool).await.unwrap();
-                handle.manage(DbState { pool: pool.clone() });
-                
-                // Periodic Sync
+                pool
+            });
+
+            // MANAGE STATE IMMEDIATELY
+            app.manage(DbState { pool: pool.clone() });
+
+            // Run periodic sync in background
+            tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(600));
                 loop {
                     interval.tick().await;
                     check_feeds(&pool).await;
                 }
             });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

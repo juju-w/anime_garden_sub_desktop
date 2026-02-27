@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
-import { Plus, Trash2, Loader2, ExternalLink, Edit3, Copy, Check, FileText, FolderOpen, Zap, DownloadCloud, Pause, Play as PlayIcon, X } from 'lucide-react';
+import { Plus, Trash2, Loader2, Edit3, Copy, Check, FileText, FolderOpen, Zap, DownloadCloud, Pause, Play as PlayIcon, X, ExternalLink } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
-const translations = {
+const translations: Record<string, any> = {
   en: {
     title: "Anime Garden",
     dashboard: "Trackers",
@@ -174,7 +174,7 @@ const translations = {
     threads: "スレッド数",
     openAriaNg: "モニタ",
     saveSettings: "保存",
-    downloadStatus: "状態",
+    downloadStatus: "状态",
     episodeTitle: "タイトル",
     timestamp: "日時",
     status_submitted: "成功",
@@ -192,21 +192,22 @@ const translations = {
     engineVersion: "バージョン",
     nodeStatus: "ステータス",
     online: "動作中",
-    saveError: "保存に失敗しました：",
-    noDownloads: "ダウンロードはありません。",
-    speed: "速度",
-    progress: "進捗",
-    task_active: "ダウンロード中",
-    task_waiting: "待機中",
-    task_paused: "一時停止",
-    task_error: "エラー",
-    task_complete: "完了",
-    task_removed: "削除済み"
+    saveError: "保存に失敗しました："
   }
 };
 
 type Lang = 'en' | 'cn' | 'jp';
 type View = 'dashboard' | 'history' | 'downloads' | 'settings';
+
+interface Subscription {
+  id: number;
+  name: string;
+  url: string;
+  is_active: boolean;
+  download_history: boolean;
+  last_checked_at?: string;
+  filters?: { keyword: string, filter_type: string }[];
+}
 
 function Logo() {
   return (
@@ -235,9 +236,9 @@ function App() {
   useEffect(() => { localStorage.setItem('lang', lang); }, [lang]);
 
   const { data: subscriptions } = useQuery({ queryKey: ['subscriptions'], queryFn: async () => await invoke("get_subscriptions"), enabled: view === 'dashboard' });
-  const { data: historyList } = useQuery({ queryKey: ['history'], queryFn: async () => await invoke("get_history"), enabled: view === 'history' });
+  const { data: historyList } = useQuery({ queryKey: ['history'], queryFn: async () => (await invoke("get_history") as any[]), enabled: view === 'history' });
   const { data: appSettings } = useQuery({ queryKey: ['settings'], queryFn: async () => await invoke("get_settings"), enabled: view === 'settings' });
-  const { data: tasks } = useQuery({ queryKey: ['tasks'], queryFn: async () => await invoke("get_tasks"), enabled: view === 'downloads', refetchInterval: 2000 });
+  const { data: tasks } = useQuery({ queryKey: ['tasks'], queryFn: async () => (await invoke("get_tasks") as any[]), enabled: view === 'downloads', refetchInterval: 2000 });
 
   useEffect(() => { if (appSettings) setEditSettings(appSettings as any); }, [appSettings]);
 
@@ -252,7 +253,13 @@ function App() {
     mutationFn: (sub: typeof newSub) => {
       const filters = sub.keywords ? sub.keywords.split(',').map(kw => ({ keyword: kw.trim(), filter_type: 'include' })) : [];
       const { keywords, ...rest } = sub;
-      const payload = { ...rest, id: editId, filters };
+      const payload = { 
+        ...rest, 
+        id: editId, 
+        filters,
+        is_active: true,
+        last_checked_at: null 
+      };
       return invoke("upsert_subscription", { sub: payload });
     },
     onSuccess: () => {
@@ -263,11 +270,23 @@ function App() {
     onError: (err: any) => alert(`${t.saveError}${err}`)
   });
 
-  const toggleMutation = useMutation({ mutationFn: ({id, active}: {id: number, active: boolean}) => invoke("toggle_subscription", { id, active }), onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['subscriptions'] }); setTimeout(() => queryClient.invalidateQueries({ queryKey: ['subscriptions'] }), 1500); } });
-  const deleteMutation = useMutation({ mutationFn: (id: number) => invoke("delete_subscription", { id }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['subscriptions'] }) });
-  const clearHistoryMutation = useMutation({ mutationFn: () => invoke("clear_history"), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['history'] }) });
+  const toggleMutation = useMutation({
+    mutationFn: ({id, active}: {id: number, active: boolean}) => invoke("toggle_subscription", { id, active }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['subscriptions'] });
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['subscriptions'] }), 1500);
+    }
+  });
 
-  // Task Control Mutations
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => invoke("delete_subscription", { id }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['subscriptions'] })
+  });
+  const clearHistoryMutation = useMutation({
+    mutationFn: () => invoke("clear_history"),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['history'] })
+  });
+
   const pauseTaskMutation = useMutation({ mutationFn: (gid: string) => invoke("pause_task", { gid }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tasks'] }) });
   const resumeTaskMutation = useMutation({ mutationFn: (gid: string) => invoke("resume_task", { gid }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tasks'] }) });
   const removeTaskMutation = useMutation({ mutationFn: (gid: string) => invoke("remove_task", { gid }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tasks'] }) });
@@ -279,8 +298,22 @@ function App() {
     return `${s} B/s`;
   };
 
-  const openEdit = (sub: any) => { setEditId(sub.id); setNewSub({ name: sub.name, url: sub.url, download_history: sub.download_history, keywords: sub.filters?.map((f:any) => f.keyword).join(', ') || '' }); setIsModalOpen(true); };
-  const closeModal = () => { setIsModalOpen(false); setEditId(null); setNewSub({ name: '', url: '', download_history: false, keywords: '' }); };
+  const openEdit = (sub: Subscription) => {
+    setEditId(sub.id);
+    setNewSub({
+      name: sub.name,
+      url: sub.url,
+      download_history: sub.download_history,
+      keywords: sub.filters?.map(f => f.keyword).join(', ') || ''
+    });
+    setIsModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setEditId(null);
+    setNewSub({ name: '', url: '', download_history: false, keywords: '' });
+  };
 
   const copyToClipboard = (text: string, id: number | string) => {
     navigator.clipboard.writeText(text);
@@ -290,9 +323,9 @@ function App() {
   const exportAsTxt = () => { if (!historyList) return; const content = (historyList as any[]).map((item: any) => item.magnet_link).join('\n'); const blob = new Blob([content], { type: 'text/plain' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `magnets.txt`; link.click(); };
 
   return (
-    <div className="min-h-screen bg-[#FAFAFA] text-slate-700 font-sans antialiased selection:bg-blue-100 h-screen flex flex-col overflow-hidden">
+    <div className="min-h-screen bg-[#FAFAFA] text-slate-700 font-sans antialiased selection:bg-blue-100 h-screen flex flex-col overflow-hidden font-medium">
       <header className="bg-white border-b border-slate-200 px-6 py-3 flex justify-between items-center shrink-0">
-        <div onClick={() => setView('dashboard')} className="flex items-center gap-2.5 cursor-pointer group"><Logo /><div><h1 className="text-sm font-bold tracking-tight text-slate-900">{t.title}</h1><p className="text-[9px] font-bold text-blue-500 uppercase tracking-widest leading-none">Desktop v1.5</p></div></div>
+        <div onClick={() => setView('dashboard')} className="flex items-center gap-2.5 cursor-pointer group"><Logo /><div><h1 className="text-sm font-bold tracking-tight text-slate-900">{t.title}</h1><p className="text-[9px] font-bold text-blue-500 uppercase tracking-widest leading-none">Desktop Pro</p></div></div>
         <div className="flex items-center gap-4">
           <nav className="flex bg-slate-100 p-0.5 rounded-lg">{(['dashboard', 'history', 'downloads', 'settings'] as View[]).map((v) => (<button key={v} onClick={() => setView(v)} className={`px-4 py-1.5 rounded-md text-[11px] font-bold transition-all ${view === v ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{t[v]}</button>))}</nav>
           <div className="flex bg-slate-100 p-0.5 rounded-lg">{(['en', 'cn', 'jp'] as Lang[]).map((l) => (<button key={l} onClick={() => setLang(l)} className={`w-7 py-1.5 rounded-md text-[9px] font-bold uppercase transition-all ${lang === l ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>{l}</button>))}</div>
@@ -312,52 +345,8 @@ function App() {
         )}
 
         {view === 'downloads' && (
-          <>
-            <div className="flex justify-between items-center mb-6"><h2 className="text-xl font-bold text-slate-900 tracking-tight">{t.downloads}</h2></div>
-            <div className="space-y-4">
-              {(tasks as any[])?.map((task: any) => {
-                const progress = (parseInt(task.completed_length) / parseInt(task.total_length) * 100) || 0;
-                return (
-                  <div key={task.gid} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm group">
-                    <div className="flex justify-between items-start mb-3">
-                      <div className="min-w-0 flex-1 pr-4">
-                        <h3 className="text-[13px] font-bold text-slate-800 truncate mb-1">{task.name}</h3>
-                        <div className="flex items-center gap-3">
-                          <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded border ${
-                            task.status === 'active' ? 'bg-blue-50 text-blue-600 border-blue-100' : 
-                            task.status === 'paused' ? 'bg-slate-50 text-slate-400 border-slate-200' : 'bg-green-50 text-green-600 border-green-100'
-                          }`}>{t[`task_${task.status}` as keyof typeof t] || task.status}</span>
-                          <span className="text-[10px] font-bold text-slate-400">{t.speed}: {formatSpeed(task.download_speed)}</span>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        {task.status === 'active' ? (
-                          <button onClick={() => pauseTaskMutation.mutate(task.gid)} className="p-2 text-slate-400 hover:bg-slate-50 hover:text-blue-600 rounded-lg"><Pause size={16}/></button>
-                        ) : (task.status === 'waiting' || task.status === 'paused') && (
-                          <button onClick={() => resumeTaskMutation.mutate(task.gid)} className="p-2 text-slate-400 hover:bg-slate-50 hover:text-blue-600 rounded-lg"><PlayIcon size={16}/></button>
-                        )}
-                        <button onClick={() => removeTaskMutation.mutate(task.gid)} className="p-2 text-slate-400 hover:bg-rose-50 hover:text-red-600 rounded-lg"><X size={16}/></button>
-                      </div>
-                    </div>
-                    <div className="relative pt-1">
-                      <div className="flex mb-2 items-center justify-between">
-                        <div className="text-right text-[10px] font-bold text-slate-400 w-full">{progress.toFixed(1)}%</div>
-                      </div>
-                      <div className="overflow-hidden h-1.5 text-xs flex rounded bg-slate-100">
-                        <div style={{ width: `${progress}%` }} className={`shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center transition-all duration-500 ${task.status === 'active' ? 'bg-blue-500' : 'bg-slate-300'}`}></div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-              {(!tasks || (tasks as any[]).length === 0) && (
-                <div className="py-24 text-center bg-white rounded-xl border border-slate-100 border-dashed">
-                  <DownloadCloud size={48} className="mx-auto text-slate-200 mb-4" />
-                  <p className="text-slate-300 text-sm font-medium italic">{t.noDownloads}</p>
-                </div>
-              )}
-            </div>
-          </>
+          <><div className="flex justify-between items-center mb-6"><h2 className="text-xl font-bold text-slate-900 tracking-tight">{t.downloads}</h2></div>
+            <div className="space-y-4">{(tasks as any[])?.map((task: any) => { const progress = (parseInt(task.completed_length) / parseInt(task.total_length) * 100) || 0; return (<div key={task.gid} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm group"><div className="flex justify-between items-start mb-3"><div className="min-w-0 flex-1 pr-4"><h3 className="text-[13px] font-bold text-slate-800 truncate mb-1">{task.name}</h3><div className="flex items-center gap-3"><span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded border ${task.status === 'active' ? 'bg-blue-50 text-blue-600 border-blue-100' : task.status === 'paused' ? 'bg-slate-50 text-slate-400 border-slate-200' : 'bg-green-50 text-green-600 border-green-100'}`}>{t[`task_${task.status}`] || task.status}</span><span className="text-[10px] font-bold text-slate-400">{t.speed}: {formatSpeed(task.download_speed)}</span></div></div><div className="flex items-center gap-1">{task.status === 'active' ? (<button onClick={() => pauseTaskMutation.mutate(task.gid)} className="p-2 text-slate-400 hover:bg-slate-50 hover:text-blue-600 rounded-lg"><Pause size={16}/></button>) : (task.status === 'waiting' || task.status === 'paused') && (<button onClick={() => resumeTaskMutation.mutate(task.gid)} className="p-2 text-slate-400 hover:bg-slate-50 hover:text-blue-600 rounded-lg"><PlayIcon size={16}/></button>)}<button onClick={() => removeTaskMutation.mutate(task.gid)} className="p-2 text-slate-400 hover:bg-rose-50 hover:text-red-600 rounded-lg"><X size={16}/></button></div></div><div className="relative pt-1"><div className="flex mb-2 items-center justify-between"><div className="text-right text-[10px] font-bold text-slate-400 w-full">{progress.toFixed(1)}%</div></div><div className="overflow-hidden h-1.5 text-xs flex rounded bg-slate-100"><div style={{ width: `${progress}%` }} className={`shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center transition-all duration-500 ${task.status === 'active' ? 'bg-blue-500' : 'bg-slate-300'}`}></div></div></div></div>); })}{(!tasks || (tasks as any[]).length === 0) && (<div className="py-24 text-center bg-white rounded-xl border border-slate-100 border-dashed"><DownloadCloud size={48} className="mx-auto text-slate-200 mb-4" /><p className="text-slate-300 text-sm font-medium italic">{t.noDownloads}</p></div>)}</div></>
         )}
 
         {view === 'settings' && (

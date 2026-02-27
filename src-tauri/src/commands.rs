@@ -6,24 +6,33 @@ use rss::Channel;
 use reqwest::Client;
 use std::time::Duration;
 use uuid::Uuid;
-use crate::DbState; // Use the state from lib.rs
+use crate::DbState;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Filter {
     pub keyword: String,
+    #[serde(default = "default_filter_type")]
     pub filter_type: String,
 }
+
+fn default_filter_type() -> String { "include".to_string() }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Subscription {
     pub id: Option<i64>,
     pub name: String,
     pub url: String,
+    #[serde(default = "default_true")]
     pub is_active: bool,
+    #[serde(default)]
     pub download_history: bool,
+    #[serde(default)]
     pub last_checked_at: Option<String>,
+    #[serde(default)]
     pub filters: Vec<Filter>,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HistoryItem {
@@ -291,4 +300,30 @@ pub async fn remove_task(state: State<'_, DbState>, gid: String) -> Result<(), S
     let _ = aria2_rpc_call("aria2.forceRemove", vec![serde_json::json!(gid)], &state.pool).await;
     let _ = aria2_rpc_call("aria2.removeDownloadResult", vec![serde_json::json!(gid)], &state.pool).await;
     Ok(())
+}
+
+// --- Unit Tests ---
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_subscription_deserialization_minimal() {
+        let json = r#"{
+            "name": "Test Anime",
+            "url": "https://example.com/rss"
+        }"#;
+        let sub: Subscription = serde_json::from_str(json).unwrap();
+        assert_eq!(sub.name, "Test Anime");
+        assert_eq!(sub.is_active, true); // Default value
+        assert_eq!(sub.download_history, false); // Default value
+    }
+
+    #[test]
+    fn test_filter_deserialization() {
+        let json = r#"{"keyword": "1080P"}"#;
+        let filter: Filter = serde_json::from_str(json).unwrap();
+        assert_eq!(filter.keyword, "1080P");
+        assert_eq!(filter.filter_type, "include");
+    }
 }

@@ -4,6 +4,7 @@ use tauri::{Manager};
 use sqlx::{sqlite::SqlitePool};
 use std::time::Duration;
 use crate::commands::*;
+use tauri_plugin_shell::ShellExt;
 
 pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     sqlx::query("CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY, name TEXT, url TEXT UNIQUE, is_active INTEGER, download_history INTEGER, last_checked_at TEXT)").execute(pool).await.map_err(|e| e.to_string())?;
@@ -16,9 +17,18 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let handle = app.handle().clone();
+            
+            // Start Aria2 Sidecar
+            let sidecar_command = app.shell().sidecar("aria2c").unwrap()
+                .args(["--enable-rpc", "--rpc-listen-all", "--rpc-allow-origin-all", "--quiet"]);
+            
+            let (mut _rx, _child) = sidecar_command.spawn().expect("Failed to spawn aria2c sidecar");
+
             tauri::async_runtime::spawn(async move {
                 let data_dir = handle.path().app_data_dir().unwrap();
                 std::fs::create_dir_all(&data_dir).unwrap();

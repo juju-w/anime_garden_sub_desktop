@@ -37,6 +37,8 @@ pub struct HistoryItem {
 pub struct AppSettings {
     pub aria2_rpc_url: String,
     pub aria2_rpc_secret: String,
+    pub download_path: String,
+    pub max_threads: String,
 }
 
 pub struct DbState {
@@ -79,9 +81,7 @@ pub async fn check_feeds(pool: &SqlitePool) {
             Err(_) => return,
         };
 
-    let settings_row = sqlx::query("SELECT key, value FROM settings").fetch_all(pool).await.unwrap_or_default();
-    let rpc_url = settings_row.iter().find(|r| r.get::<String, _>(0) == "aria2_rpc_url").map(|r| r.get::<String, _>(1)).unwrap_or_else(|| "http://localhost:6800/jsonrpc".to_string());
-    let rpc_secret = settings_row.iter().find(|r| r.get::<String, _>(0) == "aria2_rpc_secret").map(|r| r.get::<String, _>(1)).unwrap_or_default();
+    let settings = get_settings_internal(pool).await;
 
     for row in subs {
         let sub_id: i64 = row.get(0);
@@ -115,7 +115,7 @@ pub async fn check_feeds(pool: &SqlitePool) {
                         if matched {
                             let mut status = "skipped".to_string();
                             if download_history || !is_first_run {
-                                if submit_to_aria2(&rpc_url, &rpc_secret, magnet).await {
+                                if submit_to_aria2(&settings.aria2_rpc_url, &settings.aria2_rpc_secret, magnet).await {
                                     status = "submitted".to_string();
                                 } else {
                                     status = "failed".to_string();
@@ -133,6 +133,20 @@ pub async fn check_feeds(pool: &SqlitePool) {
             .bind(Utc::now().to_rfc3339()).bind(sub_id).execute(pool).await;
     }
 }
+
+async fn get_settings_internal(pool: &SqlitePool) -> AppSettings {
+    let rows = sqlx::query("SELECT key, value FROM settings").fetch_all(pool).await.unwrap_or_default();
+    let find = |k: &str, default: &str| rows.iter().find(|r| r.get::<String, _>(0) == k).map(|r| r.get::<String, _>(1)).unwrap_or_else(|| default.to_string());
+    
+    AppSettings {
+        aria2_rpc_url: find("aria2_rpc_url", "http://localhost:6800/jsonrpc"),
+        aria2_rpc_secret: find("aria2_rpc_secret", ""),
+        download_path: find("download_path", ""),
+        max_threads: find("max_threads", "5"),
+    }
+}
+
+// --- Commands ---
 
 #[tauri::command]
 pub async fn get_subscriptions(state: State<'_, DbState>) -> Result<Vec<Subscription>, String> {
@@ -191,13 +205,18 @@ pub async fn clear_history(state: State<'_, DbState>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, DbState>) -> Result<AppSettings, String> {
-    let url = sqlx::query("SELECT value FROM settings WHERE key = 'aria2_rpc_url'").fetch_optional(&state.pool).await.map_err(|e| e.to_string())?;
-    let secret = sqlx::query("SELECT value FROM settings WHERE key = 'aria2_rpc_secret'").fetch_optional(&state.pool).await.map_err(|e| e.to_string())?;
-    Ok(AppSettings { aria2_rpc_url: url.map(|r| r.get(0)).unwrap_or_else(|| "http://localhost:6800/jsonrpc".to_string()), aria2_rpc_secret: secret.map(|r| r.get(0)).unwrap_or_default() })
+    Ok(get_settings_internal(&state.pool).await)
 }
 
 #[tauri::command]
 pub async fn save_settings(state: State<'_, DbState>, settings: AppSettings) -> Result<(), String> {
-    sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('aria2_rpc_url', ?), ('aria2_rpc_secret', ?)").bind(settings.aria2_rpc_url).bind(settings.aria2_rpc_secret).execute(&state.pool).await.map_err(|e| e.to_string())?;
+    sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('aria2_rpc_url', ?), ('aria2_rpc_secret', ?), ('download_path', ?), ('max_threads', ?)")
+        .bind(settings.aria2_rpc_url)
+        .bind(settings.aria2_rpc_secret)
+        .bind(settings.download_path)
+        .bind(settings.max_threads)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }

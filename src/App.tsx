@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Trash2, Loader2, Edit3, Copy, Check, FileText, FolderOpen, Zap } from 'lucide-react';
+import { Plus, Trash2, Loader2, ExternalLink, Edit3, Copy, Check, FileText, FolderOpen, Zap, DownloadCloud, Pause, Play as PlayIcon, X } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -9,6 +9,7 @@ const translations = {
     title: "Anime Garden",
     dashboard: "Trackers",
     history: "History",
+    downloads: "Downloads",
     settings: "Settings",
     addTracker: "New Tracker",
     syncInterval: "Auto-sync active",
@@ -36,7 +37,7 @@ const translations = {
     ariaStatus: "Internal Engine Settings",
     ariaRpc: "Local RPC Address",
     ariaSecret: "Security Token (Optional)",
-    storage: "Select where to save your anime downloads.",
+    storage: "Download Path",
     selectFolder: "Choose Folder",
     threads: "Download Threads",
     openAriaNg: "Web Monitor",
@@ -59,12 +60,22 @@ const translations = {
     engineVersion: "App Version",
     nodeStatus: "Engine Status",
     online: "Online",
-    saveError: "Save failed: "
+    saveError: "Save failed: ",
+    noDownloads: "No active downloads.",
+    speed: "Speed",
+    progress: "Progress",
+    task_active: "Downloading",
+    task_waiting: "Waiting",
+    task_paused: "Paused",
+    task_error: "Error",
+    task_complete: "Completed",
+    task_removed: "Removed"
   },
   cn: {
     title: "动漫花园",
     dashboard: "订阅列表",
-    history: "下载历史",
+    history: "历史记录",
+    downloads: "下载管理",
     settings: "系统设置",
     addTracker: "添加追踪",
     syncInterval: "自动监控已开启",
@@ -95,8 +106,8 @@ const translations = {
     storage: "请选择番剧下载保存的位置。",
     selectFolder: "选择目录",
     threads: "并发下载线程",
-    openAriaNg: "打开网页监控",
-    saveSettings: "保存配置",
+    openAriaNg: "打开监控",
+    saveSettings: "保存设置",
     downloadStatus: "状态",
     episodeTitle: "剧集名称",
     timestamp: "时间",
@@ -109,18 +120,28 @@ const translations = {
     copyAll: "复制全部",
     exportTxt: "导出为 .txt",
     copied: "已复制",
-    clearHistory: "清空历史",
-    confirmClear: "确定要清空历史记录吗？",
+    clearHistory: "清空历史记录",
+    confirmClear: "确定要清空历史吗？",
     systemInfo: "桌面专业版",
     engineVersion: "系统版本",
     nodeStatus: "核心状态",
     online: "运行中",
-    saveError: "保存失败："
+    saveError: "保存失败：",
+    noDownloads: "当前没有下载任务。",
+    speed: "速度",
+    progress: "进度",
+    task_active: "正在下载",
+    task_waiting: "等待中",
+    task_paused: "已暂停",
+    task_error: "出错",
+    task_complete: "已完成",
+    task_removed: "已移除"
   },
   jp: {
     title: "アニメガーデン",
     dashboard: "トラッカー",
     history: "履歴",
+    downloads: "ダウンロード",
     settings: "設定",
     addTracker: "新規追加",
     syncInterval: "自動監視中",
@@ -153,7 +174,7 @@ const translations = {
     threads: "スレッド数",
     openAriaNg: "モニタ",
     saveSettings: "保存",
-    downloadStatus: "状态",
+    downloadStatus: "状態",
     episodeTitle: "タイトル",
     timestamp: "日時",
     status_submitted: "成功",
@@ -171,22 +192,21 @@ const translations = {
     engineVersion: "バージョン",
     nodeStatus: "ステータス",
     online: "動作中",
-    saveError: "保存に失敗しました："
+    saveError: "保存に失敗しました：",
+    noDownloads: "ダウンロードはありません。",
+    speed: "速度",
+    progress: "進捗",
+    task_active: "ダウンロード中",
+    task_waiting: "待機中",
+    task_paused: "一時停止",
+    task_error: "エラー",
+    task_complete: "完了",
+    task_removed: "削除済み"
   }
 };
 
 type Lang = 'en' | 'cn' | 'jp';
-type View = 'dashboard' | 'history' | 'settings';
-
-interface Subscription {
-  id: number;
-  name: string;
-  url: string;
-  is_active: boolean;
-  download_history: boolean;
-  last_checked_at?: string;
-  filters?: { keyword: string, filter_type: string }[];
-}
+type View = 'dashboard' | 'history' | 'downloads' | 'settings';
 
 function Logo() {
   return (
@@ -217,6 +237,7 @@ function App() {
   const { data: subscriptions } = useQuery({ queryKey: ['subscriptions'], queryFn: async () => await invoke("get_subscriptions"), enabled: view === 'dashboard' });
   const { data: historyList } = useQuery({ queryKey: ['history'], queryFn: async () => await invoke("get_history"), enabled: view === 'history' });
   const { data: appSettings } = useQuery({ queryKey: ['settings'], queryFn: async () => await invoke("get_settings"), enabled: view === 'settings' });
+  const { data: tasks } = useQuery({ queryKey: ['tasks'], queryFn: async () => await invoke("get_tasks"), enabled: view === 'downloads', refetchInterval: 2000 });
 
   useEffect(() => { if (appSettings) setEditSettings(appSettings as any); }, [appSettings]);
 
@@ -239,44 +260,27 @@ function App() {
       closeModal();
       setTimeout(() => queryClient.invalidateQueries({ queryKey: ['subscriptions'] }), 1000);
     },
-    onError: (err: any) => {
-      alert(`${t.saveError}${err}`);
-    }
+    onError: (err: any) => alert(`${t.saveError}${err}`)
   });
 
-  const toggleMutation = useMutation({
-    mutationFn: ({id, active}: {id: number, active: boolean}) => invoke("toggle_subscription", { id, active }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['subscriptions'] });
-      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['subscriptions'] }), 1500);
-    }
-  });
+  const toggleMutation = useMutation({ mutationFn: ({id, active}: {id: number, active: boolean}) => invoke("toggle_subscription", { id, active }), onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['subscriptions'] }); setTimeout(() => queryClient.invalidateQueries({ queryKey: ['subscriptions'] }), 1500); } });
+  const deleteMutation = useMutation({ mutationFn: (id: number) => invoke("delete_subscription", { id }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['subscriptions'] }) });
+  const clearHistoryMutation = useMutation({ mutationFn: () => invoke("clear_history"), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['history'] }) });
 
-  const deleteMutation = useMutation({
-    mutationFn: (id: number) => invoke("delete_subscription", { id }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['subscriptions'] })
-  });
-  const clearHistoryMutation = useMutation({
-    mutationFn: () => invoke("clear_history"),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['history'] })
-  });
+  // Task Control Mutations
+  const pauseTaskMutation = useMutation({ mutationFn: (gid: string) => invoke("pause_task", { gid }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tasks'] }) });
+  const resumeTaskMutation = useMutation({ mutationFn: (gid: string) => invoke("resume_task", { gid }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tasks'] }) });
+  const removeTaskMutation = useMutation({ mutationFn: (gid: string) => invoke("remove_task", { gid }), onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tasks'] }) });
 
-  const openEdit = (sub: Subscription) => {
-    setEditId(sub.id);
-    setNewSub({
-      name: sub.name,
-      url: sub.url,
-      download_history: sub.download_history,
-      keywords: sub.filters?.map(f => f.keyword).join(', ') || ''
-    });
-    setIsModalOpen(true);
+  const formatSpeed = (speed: string) => {
+    const s = parseInt(speed);
+    if (s > 1024 * 1024) return `${(s / 1024 / 1024).toFixed(1)} MB/s`;
+    if (s > 1024) return `${(s / 1024).toFixed(1)} KB/s`;
+    return `${s} B/s`;
   };
 
-  const closeModal = () => {
-    setIsModalOpen(false);
-    setEditId(null);
-    setNewSub({ name: '', url: '', download_history: false, keywords: '' });
-  };
+  const openEdit = (sub: any) => { setEditId(sub.id); setNewSub({ name: sub.name, url: sub.url, download_history: sub.download_history, keywords: sub.filters?.map((f:any) => f.keyword).join(', ') || '' }); setIsModalOpen(true); };
+  const closeModal = () => { setIsModalOpen(false); setEditId(null); setNewSub({ name: '', url: '', download_history: false, keywords: '' }); };
 
   const copyToClipboard = (text: string, id: number | string) => {
     navigator.clipboard.writeText(text);
@@ -290,7 +294,7 @@ function App() {
       <header className="bg-white border-b border-slate-200 px-6 py-3 flex justify-between items-center shrink-0">
         <div onClick={() => setView('dashboard')} className="flex items-center gap-2.5 cursor-pointer group"><Logo /><div><h1 className="text-sm font-bold tracking-tight text-slate-900">{t.title}</h1><p className="text-[9px] font-bold text-blue-500 uppercase tracking-widest leading-none">Desktop v1.5</p></div></div>
         <div className="flex items-center gap-4">
-          <nav className="flex bg-slate-100 p-0.5 rounded-lg">{(['dashboard', 'history', 'settings'] as View[]).map((v) => (<button key={v} onClick={() => setView(v)} className={`px-4 py-1.5 rounded-md text-[11px] font-bold transition-all ${view === v ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{t[v]}</button>))}</nav>
+          <nav className="flex bg-slate-100 p-0.5 rounded-lg">{(['dashboard', 'history', 'downloads', 'settings'] as View[]).map((v) => (<button key={v} onClick={() => setView(v)} className={`px-4 py-1.5 rounded-md text-[11px] font-bold transition-all ${view === v ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{t[v]}</button>))}</nav>
           <div className="flex bg-slate-100 p-0.5 rounded-lg">{(['en', 'cn', 'jp'] as Lang[]).map((l) => (<button key={l} onClick={() => setLang(l)} className={`w-7 py-1.5 rounded-md text-[9px] font-bold uppercase transition-all ${lang === l ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>{l}</button>))}</div>
         </div>
       </header>
@@ -304,7 +308,56 @@ function App() {
 
         {view === 'history' && (
           <><div className="flex justify-between items-center mb-6"><h2 className="text-xl font-bold text-slate-900 tracking-tight">{t.history}</h2><div className="flex gap-2"><button onClick={() => { if(window.confirm(t.confirmClear)) clearHistoryMutation.mutate(); }} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-100 text-red-500 hover:bg-red-50 font-bold text-[11px]"><Trash2 size={14}/> {t.clearHistory}</button><button onClick={() => copyToClipboard((historyList as any[])?.map((i:any) => i.magnet_link).join('\n') || '', 'batch')} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] transition-all shadow-sm ${isBatchCopied ? 'bg-green-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}>{isBatchCopied ? <Check size={14}/> : <Copy size={14}/>} {isBatchCopied ? t.copied : t.copyAll}</button><button onClick={exportAsTxt} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 font-bold text-[11px] transition-all shadow-sm"><FileText size={14}/> {t.exportTxt}</button></div></div>
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden divide-y divide-slate-100">{(historyList as any[])?.map((item: any) => (<div key={item.id} className="p-4 hover:bg-slate-50 transition-colors flex items-center justify-between gap-4 group"><div className="flex-1 min-w-0"><div className="flex items-center gap-2 mb-1"><span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider border ${item.status === 'submitted' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : item.status === 'skipped' ? 'bg-slate-50 text-slate-400 border-slate-100' : 'bg-rose-50 text-rose-600 border-rose-100'}`}>{item.status}</span><span className="text-[10px] text-slate-300 tabular-nums">{item.created_at}</span></div><h3 className="text-[13px] font-semibold text-slate-700 truncate pr-4">{item.title}</h3></div><div className="flex items-center gap-2"><button onClick={() => copyToClipboard(item.magnet_link, item.id)} className={`p-2 rounded-lg transition-all ${copiedId === item.id ? 'bg-green-50 text-green-600' : 'text-slate-300 hover:bg-slate-100'}`}>{copiedId === item.id ? <Check size={14}/> : <Copy size={14}/>}</button></div></div>))}</div></>
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden divide-y divide-slate-100">{(historyList as any[])?.map((item: any) => (<div key={item.id} className="p-4 hover:bg-slate-50 transition-colors flex items-center justify-between gap-4 group"><div className="flex-1 min-w-0"><div className="flex items-center gap-2 mb-1"><span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider border ${item.status === 'submitted' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : item.status === 'skipped' ? 'bg-slate-50 text-slate-400 border-slate-100' : 'bg-rose-50 text-rose-600 border-rose-100'}`}>{item.status}</span><span className="text-[10px] text-slate-300 tabular-nums">{item.created_at}</span></div><h3 className="text-[13px] font-semibold text-slate-700 truncate pr-4">{item.title}</h3></div><div className="flex items-center gap-2"><button onClick={() => copyToClipboard(item.magnet_link, item.id)} className={`p-2 rounded-lg transition-all ${copiedId === item.id ? 'bg-green-50 text-green-600' : 'text-slate-300 hover:bg-slate-100'}`}>{copiedId === item.id ? <Check size={14}/> : <Copy size={14}/>}</button><a href={item.magnet_link} className="p-2 text-slate-300 hover:bg-slate-100 hover:text-blue-600 rounded-lg transition-all"><ExternalLink size={14} /></a></div></div>))}</div></>
+        )}
+
+        {view === 'downloads' && (
+          <>
+            <div className="flex justify-between items-center mb-6"><h2 className="text-xl font-bold text-slate-900 tracking-tight">{t.downloads}</h2></div>
+            <div className="space-y-4">
+              {(tasks as any[])?.map((task: any) => {
+                const progress = (parseInt(task.completed_length) / parseInt(task.total_length) * 100) || 0;
+                return (
+                  <div key={task.gid} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm group">
+                    <div className="flex justify-between items-start mb-3">
+                      <div className="min-w-0 flex-1 pr-4">
+                        <h3 className="text-[13px] font-bold text-slate-800 truncate mb-1">{task.name}</h3>
+                        <div className="flex items-center gap-3">
+                          <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded border ${
+                            task.status === 'active' ? 'bg-blue-50 text-blue-600 border-blue-100' : 
+                            task.status === 'paused' ? 'bg-slate-50 text-slate-400 border-slate-200' : 'bg-green-50 text-green-600 border-green-100'
+                          }`}>{t[`task_${task.status}` as keyof typeof t] || task.status}</span>
+                          <span className="text-[10px] font-bold text-slate-400">{t.speed}: {formatSpeed(task.download_speed)}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {task.status === 'active' ? (
+                          <button onClick={() => pauseTaskMutation.mutate(task.gid)} className="p-2 text-slate-400 hover:bg-slate-50 hover:text-blue-600 rounded-lg"><Pause size={16}/></button>
+                        ) : (task.status === 'waiting' || task.status === 'paused') && (
+                          <button onClick={() => resumeTaskMutation.mutate(task.gid)} className="p-2 text-slate-400 hover:bg-slate-50 hover:text-blue-600 rounded-lg"><PlayIcon size={16}/></button>
+                        )}
+                        <button onClick={() => removeTaskMutation.mutate(task.gid)} className="p-2 text-slate-400 hover:bg-rose-50 hover:text-red-600 rounded-lg"><X size={16}/></button>
+                      </div>
+                    </div>
+                    <div className="relative pt-1">
+                      <div className="flex mb-2 items-center justify-between">
+                        <div className="text-right text-[10px] font-bold text-slate-400 w-full">{progress.toFixed(1)}%</div>
+                      </div>
+                      <div className="overflow-hidden h-1.5 text-xs flex rounded bg-slate-100">
+                        <div style={{ width: `${progress}%` }} className={`shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center transition-all duration-500 ${task.status === 'active' ? 'bg-blue-500' : 'bg-slate-300'}`}></div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {(!tasks || (tasks as any[]).length === 0) && (
+                <div className="py-24 text-center bg-white rounded-xl border border-slate-100 border-dashed">
+                  <DownloadCloud size={48} className="mx-auto text-slate-200 mb-4" />
+                  <p className="text-slate-300 text-sm font-medium italic">{t.noDownloads}</p>
+                </div>
+              )}
+            </div>
+          </>
         )}
 
         {view === 'settings' && (
@@ -338,7 +391,7 @@ function App() {
               <div className="space-y-1.5"><label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">{t.rssUrl}</label><input type="text" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl outline-none font-semibold text-slate-800 text-[11px] font-mono" value={newSub.url} onChange={e => setNewSub({...newSub, url: e.target.value})} /></div>
               <div className="space-y-1.5"><label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">{t.keywords}</label><input type="text" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl outline-none font-semibold text-slate-800 text-sm" placeholder="简繁内封, 1080P" value={newSub.keywords} onChange={e => setNewSub({...newSub, keywords: e.target.value})} /></div>
             </div>
-            {!editId && (<div className={`flex items-center gap-4 p-4 rounded-2xl border transition-all cursor-pointer ${newSub.download_history ? 'bg-orange-50/50 border-orange-100' : 'bg-blue-50/50 border-blue-100'}`} onClick={() => setNewSub({...newSub, download_history: !newSub.download_history})}><input type="checkbox" className="w-4 h-4 rounded border-slate-300 text-blue-600 pointer-events-none" checked={newSub.download_history} readOnly /><div className="flex-1"><span className={`block text-xs font-bold uppercase ${newSub.download_history ? 'text-orange-900' : 'text-blue-900'}`}>{t.downloadHist}</span><p className="text-[10px] font-bold opacity-60 leading-none mt-1">{newSub.download_history ? t.histDesc : t.monitorDesc}</p></div></div>)}
+            {!editId && (<div className={`flex items-center gap-4 p-4 rounded-2xl border transition-all cursor-pointer ${newSub.download_history ? 'bg-orange-50/50 border-orange-100' : 'bg-blue-50/50 border-blue-100'}`} onClick={() => setNewSub({...newSub, download_history: !newSub.download_history})}><input type="checkbox" className="w-4 h-4 rounded border-slate-300 text-blue-600 pointer-events-none" checked={newSub.download_history} readOnly /><div className="flex-1"><span className={`block text-sm font-bold uppercase tracking-tight ${newSub.download_history ? 'text-orange-900' : 'text-blue-900'}`}>{t.downloadHist}</span><p className="text-[10px] font-bold opacity-60 leading-none mt-1">{newSub.download_history ? t.histDesc : t.monitorDesc}</p></div></div>)}
             <div className="flex justify-end gap-4 pt-4 border-t border-slate-50"><button onClick={closeModal} className="px-6 py-3 text-[11px] font-bold text-slate-400 hover:text-slate-700 uppercase tracking-widest">{t.discard}</button><button onClick={() => upsertMutation.mutate(newSub)} disabled={!newSub.name || !newSub.url || upsertMutation.isPending} className="px-8 py-3 bg-blue-600 text-white rounded-xl text-xs font-bold disabled:opacity-30 flex items-center gap-3 shadow-lg active:scale-95 transition-all hover:bg-blue-700">{upsertMutation.isPending && <Loader2 size={18} className="animate-spin" />} {editId ? t.update : t.activate}</button></div>
           </div>
         </div>

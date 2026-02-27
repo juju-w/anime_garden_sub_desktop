@@ -29,7 +29,6 @@ pub fn run() {
             
             let (mut _rx, _child) = sidecar_command.spawn().expect("Failed to spawn aria2c sidecar");
 
-            // Use block_on for critical initialization to ensure state is managed before setup returns
             let pool = tauri::async_runtime::block_on(async move {
                 let data_dir = handle.path().app_data_dir().unwrap();
                 std::fs::create_dir_all(&data_dir).unwrap();
@@ -40,10 +39,8 @@ pub fn run() {
                 pool
             });
 
-            // MANAGE STATE IMMEDIATELY
             app.manage(DbState { pool: pool.clone() });
 
-            // Run periodic sync in background
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(600));
                 loop {
@@ -56,7 +53,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_subscriptions, upsert_subscription, toggle_subscription, delete_subscription,
-            get_history, clear_history, get_settings, save_settings
+            get_history, clear_history, get_settings, save_settings,
+            get_tasks, pause_task, resume_task, remove_task
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -41,9 +41,48 @@ pub struct AppSettings {
     pub max_threads: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DownloadTask {
+    pub gid: String,
+    pub name: String,
+    pub status: String,
+    pub total_length: String,
+    pub completed_length: String,
+    pub download_speed: String,
+}
+
 pub struct DbState {
     pub pool: SqlitePool,
 }
+
+// --- Aria2 Helpers ---
+
+async fn aria2_rpc_call(method: &str, params: Vec<serde_json::Value>, pool: &SqlitePool) -> Result<serde_json::Value, String> {
+    let settings = get_settings_internal(pool).await;
+    let client = Client::new();
+    let mut final_params = params;
+    if !settings.aria2_rpc_secret.is_empty() {
+        final_params.insert(0, serde_json::json!(format!("token:{}", settings.aria2_rpc_secret)));
+    }
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": Uuid::new_v4().to_string(),
+        "method": method,
+        "params": final_params
+    });
+
+    let res = client.post(&settings.aria2_rpc_url).json(&payload).send().await
+        .map_err(|e| e.to_string())?;
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    
+    if let Some(error) = json.get("error") {
+        return Err(error["message"].as_str().unwrap_or("Unknown RPC error").to_string());
+    }
+    Ok(json.get("result").cloned().unwrap_or_default())
+}
+
+// --- Background Logic ---
 
 async fn submit_to_aria2(rpc_url: &str, secret: &str, magnet: &str) -> bool {
     let client = Client::new();
@@ -211,12 +250,50 @@ pub async fn get_settings(state: State<'_, DbState>) -> Result<AppSettings, Stri
 #[tauri::command]
 pub async fn save_settings(state: State<'_, DbState>, settings: AppSettings) -> Result<(), String> {
     sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('aria2_rpc_url', ?), ('aria2_rpc_secret', ?), ('download_path', ?), ('max_threads', ?)")
-        .bind(settings.aria2_rpc_url)
-        .bind(settings.aria2_rpc_secret)
-        .bind(settings.download_path)
-        .bind(settings.max_threads)
-        .execute(&state.pool)
-        .await
-        .map_err(|e| e.to_string())?;
+        .bind(settings.aria2_rpc_url).bind(settings.aria2_rpc_secret).bind(settings.download_path).bind(settings.max_threads)
+        .execute(&state.pool).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// --- Aria2 Task Management ---
+
+#[tauri::command]
+pub async fn get_tasks(state: State<'_, DbState>) -> Result<Vec<DownloadTask>, String> {
+    let res = aria2_rpc_call("aria2.tellAll", vec![], &state.pool).await?;
+    let tasks: Vec<DownloadTask> = res.as_array().unwrap_or(&vec![]).iter().map(|t| {
+        // Find name from bittorrent info or path
+        let name = t["bittorrent"]["info"]["name"].as_str()
+            .or_else(|| t["files"][0]["path"].as_str())
+            .unwrap_or("Unknown Task").to_string();
+            
+        DownloadTask {
+            gid: t["gid"].as_str().unwrap_or_default().to_string(),
+            name,
+            status: t["status"].as_str().unwrap_or_default().to_string(),
+            total_length: t["totalLength"].as_str().unwrap_or("0").to_string(),
+            completed_length: t["completedLength"].as_str().unwrap_or("0").to_string(),
+            download_speed: t["downloadSpeed"].as_str().unwrap_or("0").to_string(),
+        }
+    }).collect();
+    Ok(tasks)
+}
+
+#[tauri::command]
+pub async fn pause_task(state: State<'_, DbState>, gid: String) -> Result<(), String> {
+    aria2_rpc_call("aria2.pause", vec![serde_json::json!(gid)], &state.pool).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn resume_task(state: State<'_, DbState>, gid: String) -> Result<(), String> {
+    aria2_rpc_call("aria2.unpause", vec![serde_json::json!(gid)], &state.pool).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_task(state: State<'_, DbState>, gid: String) -> Result<(), String> {
+    // Try force remove
+    let _ = aria2_rpc_call("aria2.forceRemove", vec![serde_json::json!(gid)], &state.pool).await;
+    let _ = aria2_rpc_call("aria2.removeDownloadResult", vec![serde_json::json!(gid)], &state.pool).await;
     Ok(())
 }

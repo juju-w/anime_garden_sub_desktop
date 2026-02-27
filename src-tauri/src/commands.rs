@@ -66,9 +66,15 @@ pub struct DownloadTask {
 async fn aria2_rpc_call(method: &str, params: Vec<serde_json::Value>, pool: &sqlx::SqlitePool) -> Result<serde_json::Value, String> {
     let settings = get_settings_internal(pool).await;
     let client = Client::new();
-    let mut final_params = params;
+    let mut final_params = Vec::new();
+    
+    // Auth token must be first if present
     if !settings.aria2_rpc_secret.is_empty() {
-        final_params.insert(0, serde_json::json!(format!("token:{}", settings.aria2_rpc_secret)));
+        final_params.push(serde_json::json!(format!("token:{}", settings.aria2_rpc_secret)));
+    }
+    
+    for p in params {
+        final_params.push(p);
     }
 
     let payload = serde_json::json!({
@@ -79,8 +85,8 @@ async fn aria2_rpc_call(method: &str, params: Vec<serde_json::Value>, pool: &sql
     });
 
     let res = client.post(&settings.aria2_rpc_url).json(&payload).send().await
-        .map_err(|e| e.to_string())?;
-    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Network error: {}", e))?;
+    let json: serde_json::Value = res.json().await.map_err(|e| format!("JSON error: {}", e))?;
     
     if let Some(error) = json.get("error") {
         return Err(error["message"].as_str().unwrap_or("Unknown RPC error").to_string());
@@ -90,17 +96,17 @@ async fn aria2_rpc_call(method: &str, params: Vec<serde_json::Value>, pool: &sql
 
 // --- Background Logic ---
 
-async fn submit_to_aria2(rpc_url: &str, secret: &str, magnet: &str) -> bool {
+async fn submit_to_aria2(rpc_url: &str, secret: &str, magnet: &str, options: serde_json::Value) -> bool {
     let client = Client::new();
-    let id = Uuid::new_v4().to_string();
-    let mut params = vec![serde_json::json!([magnet])];
+    let mut params = vec![serde_json::json!([magnet]), options];
+    
     if !secret.is_empty() {
         params.insert(0, serde_json::json!(format!("token:{}", secret)));
     }
 
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
-        "id": id,
+        "id": Uuid::new_v4().to_string(),
         "method": "aria2.addUri",
         "params": params
     });
@@ -108,9 +114,17 @@ async fn submit_to_aria2(rpc_url: &str, secret: &str, magnet: &str) -> bool {
     match client.post(rpc_url).json(&payload).send().await {
         Ok(res) => {
             let json: serde_json::Value = res.json().await.unwrap_or_default();
-            json.get("result").is_some()
+            if let Some(err) = json.get("error") {
+                eprintln!("Aria2 RPC Error: {:?}", err);
+                false
+            } else {
+                json.get("result").is_some()
+            }
         }
-        Err(_) => false,
+        Err(e) => {
+            eprintln!("Aria2 Connection Error: {}", e);
+            false
+        },
     }
 }
 
@@ -153,14 +167,24 @@ pub async fn check_feeds(pool: &sqlx::SqlitePool) {
                             .bind(magnet).fetch_optional(pool).await.unwrap_or_default().is_some();
                         if exists { continue; }
 
+                        // Improved Keyword Matching: Use ALL (AND logic) for inclusion keywords
                         let matched = if filters.is_empty() { true } else {
-                            filters.iter().any(|f| title.to_lowercase().contains(&f.to_lowercase()))
+                            filters.iter().all(|f| title.to_lowercase().contains(&f.to_lowercase()))
                         };
 
                         if matched {
                             let mut status = "skipped".to_string();
                             if download_history || !is_first_run {
-                                if submit_to_aria2(&settings.aria2_rpc_url, &settings.aria2_rpc_secret, magnet).await {
+                                // Prepare Aria2 options based on settings
+                                let mut aria_options = serde_json::json!({
+                                    "split": settings.max_threads,
+                                    "max-connection-per-server": settings.max_threads
+                                });
+                                if !settings.download_path.is_empty() {
+                                    aria_options["dir"] = serde_json::json!(settings.download_path);
+                                }
+
+                                if submit_to_aria2(&settings.aria2_rpc_url, &settings.aria2_rpc_secret, magnet, aria_options).await {
                                     status = "submitted".to_string();
                                 } else {
                                     status = "failed".to_string();
@@ -315,8 +339,8 @@ mod tests {
         }"#;
         let sub: Subscription = serde_json::from_str(json).unwrap();
         assert_eq!(sub.name, "Test Anime");
-        assert_eq!(sub.is_active, true); // Default value
-        assert_eq!(sub.download_history, false); // Default value
+        assert_eq!(sub.is_active, true);
+        assert_eq!(sub.download_history, false);
     }
 
     #[test]
